@@ -9,10 +9,39 @@ const VALID_REASONS = [
   "CHANGED_MIND",
 ] as const;
 
+const VALID_STATUSES = [
+  "OPEN",
+  "IN_REVIEW",
+  "APPROVED",
+  "REJECTED",
+  "COMPLETED",
+] as const;
+
+const REASON_MAP: Record<string, string> = {
+  DAMAGED: "DAMAGED",
+  Damaged: "DAMAGED",
+
+  WRONG_ITEM: "WRONG_ITEM",
+  "Wrong Item": "WRONG_ITEM",
+
+  SIZE_ISSUE: "SIZE_ISSUE",
+  "Size Issue": "SIZE_ISSUE",
+
+  NOT_AS_DESCRIBED: "NOT_AS_DESCRIBED",
+  "Not As Described": "NOT_AS_DESCRIBED",
+
+  CHANGED_MIND: "CHANGED_MIND",
+  "Changed Mind": "CHANGED_MIND",
+};
+
 function generateReference() {
   const timestamp = Date.now().toString().slice(-8);
   return `RET-${timestamp}`;
 }
+
+/* =========================================================
+   POST /api/requests
+========================================================= */
 
 export async function POST(request: NextRequest) {
   try {
@@ -28,7 +57,6 @@ export async function POST(request: NextRequest) {
       reason,
     } = body;
 
-    // Required field validation
     if (
       !customerName ||
       !customerEmail ||
@@ -49,7 +77,6 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Quantity validation
     if (!Number.isInteger(quantity) || quantity <= 0) {
       return NextResponse.json(
         {
@@ -62,8 +89,14 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Reason validation
-    if (!VALID_REASONS.includes(reason)) {
+    const normalizedReason =
+      REASON_MAP[String(reason)] || String(reason);
+
+    if (
+      !VALID_REASONS.includes(
+        normalizedReason as (typeof VALID_REASONS)[number]
+      )
+    ) {
       return NextResponse.json(
         {
           error: {
@@ -75,17 +108,17 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Check for an existing live request
-    const existingRequest = await prisma.returnRequest.findFirst({
-      where: {
-        orderId,
-        itemName,
-        removedAt: null,
-        status: {
-          in: ["OPEN", "IN_REVIEW", "APPROVED"],
+    const existingRequest =
+      await prisma.returnRequest.findFirst({
+        where: {
+          orderId,
+          itemName,
+          removedAt: null,
+          status: {
+            in: ["OPEN", "IN_REVIEW", "APPROVED"],
+          },
         },
-      },
-    });
+      });
 
     if (existingRequest) {
       return NextResponse.json(
@@ -100,7 +133,6 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Generate a unique human-readable reference
     let reference = generateReference();
 
     while (
@@ -111,20 +143,20 @@ export async function POST(request: NextRequest) {
       reference = generateReference();
     }
 
-    // Create request
-    const returnRequest = await prisma.returnRequest.create({
-      data: {
-        reference,
-        customerName,
-        customerEmail,
-        customerPhone: customerPhone || null,
-        orderId,
-        itemName,
-        quantity,
-        reason,
-        status: "OPEN",
-      },
-    });
+    const returnRequest =
+      await prisma.returnRequest.create({
+        data: {
+          reference,
+          customerName,
+          customerEmail,
+          customerPhone: customerPhone || null,
+          orderId,
+          itemName,
+          quantity,
+          reason: normalizedReason as any,
+          status: "OPEN",
+        },
+      });
 
     return NextResponse.json(
       {
@@ -133,42 +165,134 @@ export async function POST(request: NextRequest) {
       { status: 201 }
     );
   } catch (error) {
-    console.error("Create return request error:", error);
+    console.error(
+      "Create return request error:",
+      error
+    );
 
     return NextResponse.json(
       {
         error: {
           code: "INTERNAL_ERROR",
-          message: "An unexpected error occurred while creating the request.",
+          message:
+            "An unexpected error occurred while creating the request.",
         },
       },
       { status: 500 }
     );
   }
 }
+
+/* =========================================================
+   GET /api/requests
+========================================================= */
+
 export async function GET(request: NextRequest) {
   try {
-    const { searchParams } = new URL(request.url);
+    const { searchParams } =
+      new URL(request.url);
 
-    const search = searchParams.get("search")?.trim() || "";
-    const status = searchParams.get("status") || "";
-    const reason = searchParams.get("reason") || "";
-    const sortBy = searchParams.get("sortBy") || "createdAt";
-    const sortOrder =
-      searchParams.get("sortOrder") === "asc" ? "asc" : "desc";
+    const search =
+      searchParams.get("search")?.trim() || "";
 
-    const page = Math.max(
-      Number.parseInt(searchParams.get("page") || "1", 10),
-      1
+    const rawStatus =
+      searchParams.get("status")?.trim() || "";
+
+    const rawReason =
+      searchParams.get("reason")?.trim() || "";
+
+    const sort =
+      searchParams.get("sort") || "createdAt";
+
+    const order =
+      searchParams.get("order") || "desc";
+
+    /* -----------------------------------------------------
+       Normalize status
+    ----------------------------------------------------- */
+
+    const status = rawStatus.toUpperCase();
+
+    if (
+      status &&
+      !VALID_STATUSES.includes(
+        status as (typeof VALID_STATUSES)[number]
+      )
+    ) {
+      return NextResponse.json(
+        {
+          error: {
+            code: "INVALID_STATUS",
+            message: "The supplied status is not valid.",
+          },
+        },
+        { status: 400 }
+      );
+    }
+
+    /* -----------------------------------------------------
+       Normalize reason
+
+       Frontend may send:
+
+       Damaged
+
+       or:
+
+       DAMAGED
+
+       Prisma requires:
+
+       DAMAGED
+    ----------------------------------------------------- */
+
+    const reason = rawReason
+      ? REASON_MAP[rawReason] || REASON_MAP[rawReason.toUpperCase()]
+      : "";
+
+    if (rawReason && !reason) {
+      return NextResponse.json(
+        {
+          error: {
+            code: "INVALID_REASON",
+            message: "The supplied reason is not valid.",
+          },
+        },
+        { status: 400 }
+      );
+    }
+
+    /* -----------------------------------------------------
+       Pagination
+    ----------------------------------------------------- */
+
+    const parsedPage = Number.parseInt(
+      searchParams.get("page") || "1",
+      10
     );
 
-    const pageSize = Math.min(
-      Math.max(
-        Number.parseInt(searchParams.get("pageSize") || "10", 10),
-        1
-      ),
-      50
-    );
+    const parsedPageSize =
+      Number.parseInt(
+        searchParams.get("pageSize") || "10",
+        10
+      );
+
+    const page = Number.isNaN(parsedPage)
+      ? 1
+      : Math.max(parsedPage, 1);
+
+    const pageSize = Number.isNaN(
+      parsedPageSize
+    )
+      ? 10
+      : Math.min(
+          Math.max(parsedPageSize, 1),
+          50
+        );
+
+    /* -----------------------------------------------------
+       Allowed sorting fields
+    ----------------------------------------------------- */
 
     const allowedSortFields = [
       "createdAt",
@@ -177,11 +301,21 @@ export async function GET(request: NextRequest) {
       "status",
       "reason",
       "reference",
-    ];
+    ] as const;
 
-    const safeSortBy = allowedSortFields.includes(sortBy)
-      ? sortBy
-      : "createdAt";
+    const safeSort =
+      allowedSortFields.includes(
+        sort as (typeof allowedSortFields)[number]
+      )
+        ? sort
+        : "createdAt";
+
+    const safeOrder =
+      order === "asc" ? "asc" : "desc";
+
+    /* -----------------------------------------------------
+       Build filters
+    ----------------------------------------------------- */
 
     const where = {
       removedAt: null,
@@ -191,6 +325,12 @@ export async function GET(request: NextRequest) {
             OR: [
               {
                 customerName: {
+                  contains: search,
+                  mode: "insensitive" as const,
+                },
+              },
+              {
+                customerEmail: {
                   contains: search,
                   mode: "insensitive" as const,
                 },
@@ -211,44 +351,72 @@ export async function GET(request: NextRequest) {
           }
         : {}),
 
-      ...(status ? { status: status as any } : {}),
+      ...(status
+        ? {
+            status: status as any,
+          }
+        : {}),
 
-      ...(reason ? { reason: reason as any } : {}),
+      ...(reason
+        ? {
+            reason: reason as any,
+          }
+        : {}),
     };
 
-    const [requests, total] = await Promise.all([
-      prisma.returnRequest.findMany({
-        where,
-        orderBy: {
-          [safeSortBy]: sortOrder,
-        },
-        skip: (page - 1) * pageSize,
-        take: pageSize,
-        include: {
-          notes: {
-            orderBy: {
-              createdAt: "asc",
+    /* -----------------------------------------------------
+       Fetch filtered requests
+    ----------------------------------------------------- */
+
+    const [requests, total] =
+      await Promise.all([
+        prisma.returnRequest.findMany({
+          where,
+
+          orderBy: {
+            [safeSort]: safeOrder,
+          },
+
+          skip:
+            (page - 1) * pageSize,
+
+          take: pageSize,
+
+          include: {
+            notes: {
+              orderBy: {
+                createdAt: "asc",
+              },
             },
           },
-        },
-      }),
+        }),
 
-      prisma.returnRequest.count({
-        where,
-      }),
-    ]);
+        prisma.returnRequest.count({
+          where,
+        }),
+      ]);
+
+    /* -----------------------------------------------------
+       Response
+    ----------------------------------------------------- */
 
     return NextResponse.json({
       data: requests,
-      pagination: {
+
+      meta: {
         page,
         pageSize,
         total,
-        totalPages: Math.ceil(total / pageSize),
+        totalPages: Math.ceil(
+          total / pageSize
+        ),
       },
     });
   } catch (error) {
-    console.error("List return requests error:", error);
+    console.error(
+      "List return requests error:",
+      error
+    );
 
     return NextResponse.json(
       {
